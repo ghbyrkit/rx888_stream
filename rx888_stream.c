@@ -51,43 +51,82 @@ static struct libusb_device_handle *dev_handle = NULL;
 unsigned int pktsize;
 unsigned int success_count = 0;  // Number of successful transfers
 unsigned int failure_count = 0;  // Number of failed transfers
+unsigned int block_count = 0;   // number of blocks that transfer_callback has seen.  first one is '1'
 unsigned int transfer_size = 0;  // Size of data transfers performed so far
 unsigned int transfer_index = 0; // Write index into the transfer_size array
 volatile bool stop_transfers = false; // Request to stop data transfers
 volatile int xfers_in_progress = 0;
 
+// array for histogram of the stream of unint16 samples
+unsigned long long sample_histogram[65536] = {0};
+
 volatile int sleep_time = 0;
 
 int verbose;
-static int randomizer;
-static int dither;
+
 static int has_firmware;
+
+static uint16_t changedBitsAllBlocks = 0;
+static uint16_t initialFirstValue = 0;
+
+static uint16_t findStuckBitsInBlock (uint16_t *samples, size_t sampleCount, uint16_t firstValue) {
+    uint16_t changedBits = 0;
+    uint16_t thisChangesBits = 0;
+    for (int i = 0; i < sampleCount; i++) {
+        uint16_t sample = *samples++;
+        sample_histogram[sample]++;
+
+        thisChangesBits = firstValue ^ sample;
+        changedBits |= thisChangesBits;
+    }
+
+    return changedBits;
+}
+
+static void explainStuckBits (unsigned int block_count, uint16_t firstValue, uint16_t changedBits) {
+    // there are bits stuck on or off
+    uint16_t unchangedBits = ~changedBits;
+    uint16_t stuckOn = firstValue & unchangedBits;
+    uint16_t stuckOff = ~firstValue & unchangedBits;
+    if (block_count == 0) {
+        fprintf(stderr, "Total Blocks %d bits stuck On: %x, bits stuck Off: %x\n", success_count+failure_count, stuckOn, stuckOff);
+    }
+    else {
+        fprintf(stderr, "Block %u, Error! bits stuck On: %x, bits stuck Off: %x", block_count, stuckOn, stuckOff);
+    }
+}
 
 static void transfer_callback(struct libusb_transfer *transfer) {
     int size = 0;
-    int ret = 0;
 
+    block_count++;
     xfers_in_progress--;
 
     if (transfer->status != LIBUSB_TRANSFER_COMPLETED) {
         failure_count++;
-        fprintf(stderr, "Transfer callback status %s received %d \
-	   bytes.\n",
+        fprintf(stderr, "Transfer callback status %s received %d bytes.\n",
                 libusb_error_name(transfer->status), transfer->actual_length);
     } else {
         size = transfer->actual_length;
         success_count++;
         uint16_t *samples = (uint16_t *)transfer->buffer;
-        if (randomizer) {
-            for (int i = 0; i < size / 2; i++) {
-                samples[i] ^= 0xfffe * (samples[i] & 1);
-            }
+
+        uint16_t firstValue;
+        if (block_count == 1) {
+            firstValue = initialFirstValue = *samples;
         }
-        ret = write(STDOUT_FILENO, transfer->buffer, transfer->actual_length);
-        if (ret < 0) {
-            fprintf(stderr, "Error writing to stdout: %s", strerror(errno));
+        else {
+            firstValue = initialFirstValue;
+        }
+        uint16_t changedBits = findStuckBitsInBlock (samples, size / sizeof(uint16_t), firstValue);
+        changedBitsAllBlocks |= changedBits;
+
+        if (changedBits != 0xffff) {
+            // there are bits stuck on or off
+            explainStuckBits(block_count, firstValue, changedBits);
         }
     }
+
     if (!stop_transfers) {
         if (libusb_submit_transfer(transfer) == 0)
             xfers_in_progress++;
@@ -129,8 +168,6 @@ static void sig_stop(int signum) {
 static void printhelp(void) {
     fprintf(stderr, " --verbose, -v      Verbose output\n");
     fprintf(stderr, " --firmware, -f     Firmware file\n");
-    fprintf(stderr, " --dither, -d       Enable dithering\n");
-    fprintf(stderr, " --rand, -r         Enable output randomization\n");
     fprintf(stderr, " --samplerate, -s   Sample Rate, default 32000000\n");
     fprintf(stderr, " --gainmode, -m     Gain Mode low/high, default high\n");
     fprintf(stderr, " --att, -a          Attenuation, default 0\n");
@@ -142,7 +179,7 @@ static void printhelp(void) {
 }
 int main(int argc, char **argv) {
 
-    unsigned int samplerate = 32000000;
+    unsigned int samplerate = 129600000;
     unsigned int gain = 0x83;
     unsigned int att = 0;
     int c;
@@ -150,8 +187,6 @@ int main(int argc, char **argv) {
         static struct option long_options[] = {
             {"verbose", optional_argument, &verbose, 1},
             {"firmware", required_argument, &has_firmware, 'f'},
-            {"dither", no_argument, &dither, 'd'},
-            {"rand", no_argument, &randomizer, 'r'},
             {"samplerate", required_argument, 0, 's'},
             {"gainmode", required_argument, 0, 'm'},
             {"gain", required_argument, 0, 'g'},
@@ -164,7 +199,7 @@ int main(int argc, char **argv) {
         int option_index = 0;
         int gainvalue = 0;
 
-        c = getopt_long(argc, argv, "f:drs:hm:g:a:q:p:", long_options,
+        c = getopt_long(argc, argv, "f:s:hm:g:a:q:p:", long_options,
                         &option_index);
 
         if (c == -1)
@@ -179,14 +214,6 @@ int main(int argc, char **argv) {
 
         case 'f':
             firmware = optarg;
-            break;
-
-        case 'r':
-            randomizer = 1;
-            break;
-
-        case 'd':
-            dither = 1;
             break;
 
         case 'v':
@@ -264,8 +291,6 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "Firmware: %s\n", firmware);
     fprintf(stderr, "Sample Rate: %u\n", samplerate);
-    fprintf(stderr, "Output Randomizer %s, Dither: %s\n",
-            randomizer ? "On" : "Off", dither ? "On" : "Off");
     fprintf(stderr, "Gain Mode: %s, Gain: %u, Att: %u\n",
             (gain & 0x80) ? "High" : "Low", gain & 0x7f, att);
     /* code */
@@ -405,13 +430,7 @@ has_firmware:
     }
 
     /******/
-    uint32_t gpio = 0;
-    if (dither) {
-        gpio |= DITH;
-    }
-    if (randomizer) {
-        gpio |= RANDO;
-    }
+    uint32_t gpio = 0;  // 0 is no dither, no randomizer
 
     usleep(5000);
     command_send(dev_handle, GPIOFX3, gpio);
@@ -442,6 +461,17 @@ has_firmware:
     }
 
     fprintf(stderr, "Transfers completed\n");
+
+    // here is a good place to report the global stuck bits status
+    explainStuckBits(0, initialFirstValue, changedBitsAllBlocks);
+    // explain histogram
+    fprintf(stderr, "Sample Value Histogram. reporting only missing code points (0):\n");
+    for (int i = 0; i < 65536; i++) {
+        if (sample_histogram[i] == 0) {
+            fprintf(stderr, "Sample Value 0x%x: count 0\n", i);
+        }
+    }
+
     command_send(dev_handle, STOPFX3, 0);
 
 free_transfer_buf:

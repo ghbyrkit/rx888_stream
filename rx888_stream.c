@@ -498,6 +498,14 @@ has_firmware:
             inRun = false;
         }
     }
+    if (inRun) {
+        if (runLength == 1) {
+            fprintf(stderr, "Sample Value 0x%x missing\n", firstInRun);
+        }
+        else {
+            fprintf(stderr, "Sample Values from 0x%x to 0x%x missing\n", firstInRun, lastInRun);                   
+        }
+    }
     fprintf(stderr, "There are %d missing Sample Values\n", missingCodes);
 
     command_send(dev_handle, STOPFX3, 0);

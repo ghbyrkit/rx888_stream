@@ -121,9 +121,11 @@ static void transfer_callback(struct libusb_transfer *transfer) {
         uint16_t changedBits = findStuckBitsInBlock (samples, size / sizeof(uint16_t), firstValue);
         changedBitsAllBlocks |= changedBits;
 
-        if (changedBits != 0xffff) {
-            // there are bits stuck on or off
-            explainStuckBits(block_count, firstValue, changedBits);
+        if (false) {
+            if (changedBits != 0xffff) {
+                // there are bits stuck on or off
+                explainStuckBits(block_count, firstValue, changedBits);
+            }
         }
     }
 
@@ -465,12 +467,38 @@ has_firmware:
     // here is a good place to report the global stuck bits status
     explainStuckBits(0, initialFirstValue, changedBitsAllBlocks);
     // explain histogram
-    fprintf(stderr, "Sample Value Histogram. reporting only missing code points (0):\n");
+    fprintf(stderr, "Sample Value Histogram. reporting only missing code points...\n");
+    int missingCodes = 0;
+    bool inRun = false;
+    int runLength = 0;
+    int firstInRun = 0;
+    int lastInRun = 0;
     for (int i = 0; i < 65536; i++) {
         if (sample_histogram[i] == 0) {
-            fprintf(stderr, "Sample Value 0x%x: count 0\n", i);
+            //fprintf(stderr, "Sample Value 0x%x: count 0\n", i);
+            missingCodes++;
+            if (!inRun) {
+                // start of a run
+                firstInRun = i;
+                runLength = 0;
+                inRun = true;
+            }
+            lastInRun = i;
+            runLength++;
+        }
+        else {
+            if (inRun) {
+                if (runLength == 1) {
+                    fprintf(stderr, "Sample Value 0x%x missing\n", firstInRun);
+                }
+                else {
+                    fprintf(stderr, "Sample Values from 0x%x to 0x%x missing\n", firstInRun, lastInRun);                   
+                }
+            }
+            inRun = false;
         }
     }
+    fprintf(stderr, "There are %d missing Sample Values\n", missingCodes);
 
     command_send(dev_handle, STOPFX3, 0);
 
